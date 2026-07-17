@@ -7,9 +7,17 @@ const state = {
   selected: null,  // selected option index for current question
   locked: false,   // true after answering, before moving on
   answers: [],     // {qIndex, chosen, correct}
+  studentName: sessionStorage.getItem("osp-student-name") || null,
+  startTime: null,
 };
 
 const root = document.getElementById("app");
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str;
+  return div.innerHTML;
+}
 
 function shuffle(arr) {
   const a = arr.slice();
@@ -65,7 +73,54 @@ function scoreRingSVG(accent, pct) {
     </svg>`;
 }
 
+function renderNameGate() {
+  root.innerHTML = `
+    <div class="masthead">
+      <div>
+        <div class="eyebrow">Practice Binder</div>
+        <h1>Office Skills Practice</h1>
+      </div>
+      <p class="sub">Enter your name so your instructor can see your results.</p>
+    </div>
+    <div class="question-card" style="max-width:420px; margin:0 auto;">
+      <h2 style="font-size:18px; margin-bottom:16px;">What's your name?</h2>
+      <input id="nameInput" type="text" placeholder="e.g. Priya Sharma"
+        style="width:100%; padding:12px 14px; border:1px solid var(--hairline); border-radius:8px; font-size:15px; font-family:'Inter',sans-serif; margin-bottom:16px;" />
+      <div class="quiz-actions">
+        <button class="btn" id="nameContinueBtn" style="--accent:#232733; background:var(--ink);">Continue</button>
+      </div>
+    </div>
+  `;
+  const input = document.getElementById("nameInput");
+  input.focus();
+  const submit = () => {
+    const val = input.value.trim();
+    if (!val) { input.style.borderColor = "var(--incorrect)"; return; }
+    state.studentName = val;
+    sessionStorage.setItem("osp-student-name", val);
+    renderMenu();
+  };
+  document.getElementById("nameContinueBtn").addEventListener("click", submit);
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
+}
+
+function sendResultToSheet(payload) {
+  if (typeof SHEET_WEBHOOK_URL === "undefined" || !SHEET_WEBHOOK_URL) return; // local-only mode
+  try {
+    fetch(SHEET_WEBHOOK_URL, {
+      method: "POST",
+      mode: "no-cors", // Apps Script doesn't return readable CORS headers; fire-and-forget
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify(payload),
+    }).catch(() => { /* silent — don't block the student's results screen on network issues */ });
+  } catch (e) { /* ignore */ }
+}
+
 function renderMenu() {
+  if (typeof REQUIRE_STUDENT_NAME !== "undefined" && REQUIRE_STUDENT_NAME && !state.studentName) {
+    renderNameGate();
+    return;
+  }
   const keys = Object.keys(QUESTION_BANK);
   root.innerHTML = `
     <div class="masthead">
@@ -73,7 +128,7 @@ function renderMenu() {
         <div class="eyebrow">Practice Binder</div>
         <h1>Office Skills Practice</h1>
       </div>
-      <p class="sub">Four short assessments — Word, Excel, PowerPoint, and AI Usage. 20 questions each, instant feedback, no sign-in required.</p>
+      <p class="sub">Four short assessments — Word, Excel, PowerPoint, and AI Usage. 20 questions each, instant feedback.${state.studentName ? `<br><span style="font-size:12.5px;">Signed in as <strong>${escapeHtml(state.studentName)}</strong> · <a href="#" id="changeNameLink" style="color:var(--ink-soft);">not you?</a></span>` : ""}</p>
     </div>
     <div class="binder">
       ${keys.map(k => {
@@ -97,6 +152,16 @@ function renderMenu() {
   root.querySelectorAll(".tab-card").forEach(el => {
     el.addEventListener("click", () => startQuiz(el.dataset.key));
   });
+
+  const changeNameLink = document.getElementById("changeNameLink");
+  if (changeNameLink) {
+    changeNameLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      state.studentName = null;
+      sessionStorage.removeItem("osp-student-name");
+      renderNameGate();
+    });
+  }
 }
 
 function initials(label) {
@@ -114,6 +179,7 @@ function startQuiz(key) {
   state.selected = null;
   state.locked = false;
   state.answers = [];
+  state.startTime = Date.now();
   renderQuiz();
 }
 
@@ -200,7 +266,16 @@ function renderResults() {
   const correctCount = state.answers.filter(a => a.correct).length;
   const total = state.answers.length;
   const pct = Math.round((correctCount / total) * 100);
+  const durationSeconds = state.startTime ? Math.round((Date.now() - state.startTime) / 1000) : "";
   saveBestScore(state.subjectKey, correctCount, total);
+  sendResultToSheet({
+    name: state.studentName || "Unknown",
+    subject: subject.label,
+    correct: correctCount,
+    total: total,
+    percent: pct,
+    durationSeconds: durationSeconds,
+  });
 
   let headline = "Keep practicing";
   if (pct >= 90) headline = "Excellent work";
